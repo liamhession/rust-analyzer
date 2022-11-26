@@ -1,3 +1,6 @@
+// 8:52 - 
+// next up: how could the rename_variable section take a TuplePat or an IdentPat?
+//     and: is there another assist like convert_iter_for_each_to_for whose code might help?
 use ide_db::defs::{Definition, NameRefClass};
 use syntax::{
     ast::{self, HasName},
@@ -8,6 +11,37 @@ use crate::{
     assist_context::{AssistContext, Assists},
     AssistId, AssistKind,
 };
+
+// Given a pattern, find the name of the identifier introduced to the surrounding scope.
+fn find_simple_binding(pat: ast::Pat) -> Option<ast::IdentPat> {
+    if let ast::Pat::IdentPat(ident) = pat {
+        Some(ident)
+    } else {
+        None
+    }
+}
+
+// Tuple version
+fn find_tuple_binding(pat: ast::Pat) -> Option<ast::TuplePat> {
+    if let ast::Pat::TuplePat(tuple) = pat {
+        Some(tuple)
+    } else {
+        None
+    }
+}
+
+// Unified version, just returns a Pat no matter what
+// Next time - get any idea of how better to return different Pat types
+// in addition to ast::IdentPat it should also find ast::TuplePat and other patterns that makes sense
+fn find_binding(pat: ast::Pat) -> Option<ast::Pat> {
+    if let ast::Pat::IdentPat(ident) = pat {
+        Some(ident)
+    } else if let ast::Pat::TuplePat(tuple) = pat {
+        Some(tuple)
+    } else {
+        None
+    }
+}
 
 // Assist: convert_match_to_let_else
 //
@@ -30,20 +64,28 @@ use crate::{
 // ```
 pub(crate) fn convert_match_to_let_else(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let let_stmt: ast::LetStmt = ctx.find_node_at_offset()?;
-    let binding = find_binding(let_stmt.pat()?)?;
 
+    let pat = let_stmt.pat()?;
+    println!("{}", pat);
+    let binding = match find_simple_binding(pat) {
+        Some(simple_identifier) => simple_identifier,
+        None => find_tuple_binding(pat),
+    };
+    
+
+    // initializer is the expression whose value will be assigned to the identifer/tuple of identifiers on the lhs
     let initializer = match let_stmt.initializer() {
         Some(ast::Expr::MatchExpr(it)) => it,
-        _ => return None,
+        _ => return None, // TO TEST: if there is no match statement actually, just let v = 5; it gets in here?
     };
-    let initializer_expr = initializer.expr()?;
+    let initializer_expr = initializer.expr()?;  // TO TEST: and then this fails, ending the function?
 
     let (extracting_arm, diverging_arm) = match find_arms(ctx, &initializer) {
         Some(it) => it,
         None => return None,
     };
     if extracting_arm.guard().is_some() {
-        cov_mark::hit!(extracting_arm_has_guard);
+        cov_mark::hit!(extracting_arm_has_guard); // TO TEST: Does not work for matches with guards?
         return None;
     }
 
@@ -65,15 +107,6 @@ pub(crate) fn convert_match_to_let_else(acc: &mut Assists, ctx: &AssistContext<'
     )
 }
 
-// Given a pattern, find the name introduced to the surrounding scope.
-fn find_binding(pat: ast::Pat) -> Option<ast::IdentPat> {
-    if let ast::Pat::IdentPat(ident) = pat {
-        Some(ident)
-    } else {
-        None
-    }
-}
-
 // Given a match expression, find extracting and diverging arms.
 fn find_arms(
     ctx: &AssistContext<'_>,
@@ -84,6 +117,7 @@ fn find_arms(
         return None;
     }
 
+    // TO TEST: This means that the final arm that does not return will be the "extracting" arm? Are we limited to only 2 arms?
     let mut extracting = None;
     let mut diverging = None;
     for arm in arms {
@@ -104,6 +138,7 @@ fn find_arms(
 }
 
 // Given an extracting arm, find the extracted variable.
+// should probably return Vec<ast::Name> for every binding? instead of a single name
 fn find_extracted_variable(ctx: &AssistContext<'_>, arm: &ast::MatchArm) -> Option<ast::Name> {
     match arm.expr()? {
         ast::Expr::PathExpr(path) => {
@@ -124,6 +159,8 @@ fn find_extracted_variable(ctx: &AssistContext<'_>, arm: &ast::MatchArm) -> Opti
 }
 
 // Rename `extracted` with `binding` in `pat`.
+// example: pat:= Some(it) => it     extracted:= it    binding:=  val
+// should be updated according to return types of previous functions and should handle new cases
 fn rename_variable(pat: &ast::Pat, extracted: ast::Name, binding: ast::IdentPat) -> SyntaxNode {
     let syntax = pat.syntax().clone_for_update();
     let extracted_syntax = syntax.covering_element(extracted.syntax().text_range());
@@ -383,6 +420,27 @@ struct Point {
 
 fn foo(opt: Option<Point>) {
     let Some(Point { x: 0, y: val }) = opt else { return };
+}
+    "#,
+        );
+    }
+
+    #[test]
+    fn tuple_pattern() {
+        check_assist(
+            convert_match_to_let_else,
+            r#"
+//- minicore: option
+fn foo() {
+    let (val1, val2) = $0match Some((0, 1)) {
+        Some(it) => it,
+        None => return,
+    };
+}
+    "#,
+            r#"
+fn foo() {
+    let Some((x, y)) = Some((0, 1)) else { return };
 }
     "#,
         );
