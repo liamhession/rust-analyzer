@@ -1,6 +1,6 @@
-// 8:52 - 
-// next up: how could the rename_variable section take a TuplePat or an IdentPat?
-//     and: is there another assist like convert_iter_for_each_to_for whose code might help?
+// 9:52 - 
+// next up: trying further work to bring over binders_in_pat from convert_let_else_to_match 
+//     and: switching to master branch and rebuilding the whole thing, can i run the original version of this test in debug mode to step through and follow how it works?
 use ide_db::defs::{Definition, NameRefClass};
 use syntax::{
     ast::{self, HasName},
@@ -43,6 +43,27 @@ fn find_binding(pat: ast::Pat) -> Option<ast::Pat> {
     }
 }
 
+fn binders_in_pat(
+    acc: &mut Vec<(Name, bool)>,
+    pat: &Pat,
+    sem: &Semantics<'_, RootDatabase>,
+) -> Option<()> {
+    use Pat::*;
+    match pat {
+        IdentPat(p) => {
+            let ident = p.name()?;
+            let ismut = p.ref_token().is_none() && p.mut_token().is_some();
+            // check for const reference
+            if sem.resolve_bind_pat_to_const(p).is_none() {
+                acc.push((ident, ismut));
+            }
+            if let Some(inner) = p.pat() {
+                binders_in_pat(acc, &inner, sem)?;
+            }
+            Some(())
+        }
+}
+
 // Assist: convert_match_to_let_else
 //
 // Converts let statement with match initializer to let-else statement.
@@ -67,10 +88,13 @@ pub(crate) fn convert_match_to_let_else(acc: &mut Assists, ctx: &AssistContext<'
 
     let pat = let_stmt.pat()?;
     println!("{}", pat);
-    let binding = match find_simple_binding(pat) {
-        Some(simple_identifier) => simple_identifier,
-        None => find_tuple_binding(pat),
-    };
+    let mut binders = Vec::new();
+    binders_in_pat(&mut binders, &pat, &ctx.sema);
+    // let binding =
+    // match find_simple_binding(pat) {
+    //     Some(simple_identifier) => simple_identifier,
+    //     None => find_tuple_binding(pat),
+    // };
     
 
     // initializer is the expression whose value will be assigned to the identifer/tuple of identifiers on the lhs
@@ -89,16 +113,16 @@ pub(crate) fn convert_match_to_let_else(acc: &mut Assists, ctx: &AssistContext<'
         return None;
     }
 
-    let diverging_arm_expr = diverging_arm.expr()?;
-    let extracting_arm_pat = extracting_arm.pat()?;
-    let extracted_variable = find_extracted_variable(ctx, &extracting_arm)?;
+    let diverging_arm_expr = diverging_arm.expr()?;  // None => return
+    let extracting_arm_pat = extracting_arm.pat()?;   // Some(it) => it
+    let extracted_variable = find_extracted_variable(ctx, &extracting_arm)?;  // it
 
     acc.add(
         AssistId("convert_match_to_let_else", AssistKind::RefactorRewrite),
         "Convert match to let-else",
         let_stmt.syntax().text_range(),
         |builder| {
-            let extracting_arm_pat = rename_variable(&extracting_arm_pat, extracted_variable, binding);
+            let extracting_arm_pat = rename_variable(&extracting_arm_pat, extracted_variable, binding);  // Some(val)
             builder.replace(
                 let_stmt.syntax().text_range(),
                 format!("let {extracting_arm_pat} = {initializer_expr} else {{ {diverging_arm_expr} }};")
